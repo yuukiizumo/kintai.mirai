@@ -1,59 +1,180 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# 勤怠管理アプリ
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Laravel と React を使用した、福祉事業所向けの勤怠管理アプリです。
 
-## About Laravel
+一般ユーザーは日々の出退勤打刻、業務報告、各種届出、自己管理レポートの提出を行うことができます。管理者は全利用者の勤怠確認、届出確認、ユーザー情報編集、カレンダー管理、PDF出力などをまとめて管理できます。
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## 本システムの特徴
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+### 1. 管理者と一般ユーザーを分けた勤怠管理
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+管理者ログインと一般ユーザーログインを分け、一般ユーザーは自分の勤怠情報のみ確認できるようにしています。
 
-## Learning Laravel
+管理者は全員の本日勤怠、ユーザー別の月次勤怠、部署別勤怠、届出一覧、退職者情報などを確認・編集できます。
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+### 2. 日々の打刻と業務報告を連動
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+一般ユーザーは出勤・退勤の打刻ができます。退勤時には勤務場所、申告勤務時間、申告休憩、食事割合、欠食の有無を入力できます。
 
-## Laravel Sponsors
+また、当日の業務報告が未入力の場合は退勤できないようにし、日々の記録漏れを防ぐ設計にしています。
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+### 3. 届出と勤怠状態の連動
 
-### Premium Partners
+欠勤、遅刻、早退、有給、半有給、業務対応届、変更届、介護サービス利用、勤務時間外通院などの届出を提出できます。
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+届出が出された場合は勤怠一覧の状態へ反映され、届出がない状態変更は背景色で分かるようにしています。管理者チェック、サビ管チェックにも対応しています。
 
-## Contributing
+### 4. ユーザーごとの勤務設定
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+ユーザーごとに曜日別のデフォルト出勤時刻、退勤時刻、休憩時間、勤務しない曜日を設定できます。
 
-## Code of Conduct
+部署、業務区分、業務形態、通所上限日数、入社日、有給残日数、時給、管理番号などのユーザー情報も管理できます。
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+### 5. カレンダー管理
 
-## Security Vulnerabilities
+計画有給、休日、土曜出勤、自己管理レポート提出日、自由出勤日などをカレンダーとして管理できます。
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+土曜日は原則休日とし、土曜出勤設定がある場合のみ勤務日として扱うなど、事業所の運用に合わせた判定を行います。
 
-## License
+### 6. PDF出力
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+個別勤怠一覧から、用途別のPDFを出力できます。
+
+- 出勤簿PDF
+- 会社保管用PDF
+- 業務報告PDF
+
+時間内訳は申告時間を基準に計算し、管理用の帳票として利用できます。
+
+## 機能一覧
+
+### 一般ユーザー
+
+- ユーザーログイン
+- 新規登録
+- パスワードリセット
+- 出勤打刻
+- 退勤打刻
+- 5分以内の打刻取消
+- 業務報告の入力と自動保存
+- 自分の勤怠一覧表示
+- 自分の届出一覧表示
+- 各種届出の提出
+- 自己管理レポート提出
+- 管理者からのお知らせ確認
+- 今月の土曜出勤・祝日休み確認
+
+### 管理者
+
+- 管理者ログイン
+- 管理者新規登録
+- 強管理者・弱管理者の権限制御
+- 全員の本日勤怠一覧
+- ユーザー別月次勤怠一覧
+- 部署別勤怠一覧
+- 勤怠の追加・修正・削除
+- 届出一覧の確認、削除、チェック
+- 業務報告一覧と管理者コメント確認
+- AIによる管理者コメント生成
+- ユーザー情報編集
+- 曜日別勤務設定
+- 表示順のドラッグアンドドロップ変更
+- 部署順の変更
+- 退職予定、退職、復職、完全削除
+- 退職者一覧
+- カレンダー管理
+- 自己管理レポート一覧
+- 全体お知らせ送信
+- PDF出力
+
+## 使用技術
+
+### バックエンド
+
+- PHP 8.2 以上
+- Laravel 12
+- MySQL / SQLite
+- mPDF
+
+### フロントエンド
+
+- React 19
+- Vite
+- Tailwind CSS
+- lucide-react
+- Axios
+
+### その他
+
+- PHPUnit
+- OpenRouter API
+
+## セットアップ
+
+```bash
+composer install
+npm install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+npm run build
+php artisan serve
+```
+
+開発時は以下のコマンドで、Laravel サーバー、キュー、ログ、Vite をまとめて起動できます。
+
+```bash
+composer run dev
+```
+
+## テスト
+
+```bash
+php artisan test
+```
+
+## 主要画面
+
+- `/login` 一般ユーザーログイン
+- `/admin/login` 管理者ログイン
+- `/register` 一般ユーザー新規登録
+- `/admin/register` 管理者新規登録
+- `/` 勤怠管理画面
+- `/attendance-history` 対象月の勤怠一覧
+- `/business-report-history` 業務報告履歴
+
+## 環境変数
+
+`.env` に以下を設定します。
+
+- `APP_URL`
+- `DB_CONNECTION`
+- `DB_HOST`
+- `DB_DATABASE`
+- `DB_USERNAME`
+- `DB_PASSWORD`
+- `MAIL_MAILER`
+- `MAIL_HOST`
+- `MAIL_USERNAME`
+- `MAIL_PASSWORD`
+- `MAIL_FROM_ADDRESS`
+- `OPENROUTER_API_KEY`
+
+`.env` は秘密情報を含むため、Git 管理対象外です。
+
+## デプロイ時の注意
+
+本番環境では以下を実行します。
+
+```bash
+composer install --no-dev --optimize-autoloader
+npm run build
+php artisan migrate --force
+php artisan optimize:clear
+```
+
+Laravel の `public` ディレクトリをWeb公開ディレクトリとして設定してください。
+
+## ライセンス
+
+このアプリケーションは社内・事業所運用向けに作成した勤怠管理システムです。
