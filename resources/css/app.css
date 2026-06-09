@@ -1,0 +1,77 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../**/*.blade.php';
+@source '../**/*.js';
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+@layer base {
+    * {
+        letter-spacing: 0;
+    }
+
+    body {
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+}
+
+@layer components {
+    .field-label {
+        @apply flex flex-col gap-1.5 text-sm font-semibold text-slate-700;
+    }
+
+    .field-control {
+        @apply w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100;
+    }
+
+    .primary-button {
+        @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-sky-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-200;
+    }
+
+    .secondary-button {
+        @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-100;
+    }
+
+    .danger-button {
+        @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100 focus:outline-none focus:ring-2 focus:ring-rose-100;
+    }
+
+    .icon-button {
+        @apply inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-100;
+    }
+
+    .icon-button.danger {
+        @apply border-rose-200 text-rose-700 hover:bg-rose-50;
+    }
+
+    .table-cell {
+        @apply whitespace-nowrap px-5 py-3;
+    }
+
+    .attendance-edit-panel {
+        animation: attendance-edit-slide-in 180ms ease-out both;
+    }
+}
+
+@keyframes attendance-edit-slide-in {
+    from {
+        transform: translateX(-100%);
+        opacity: 0.92;
+    }
+
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .attendance-edit-panel {
+        animation: none;
+    }
+}
