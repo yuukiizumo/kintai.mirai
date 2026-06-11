@@ -3202,7 +3202,7 @@ function AttendanceApp() {
                 {(!isAdmin || (!isStandaloneAdminPage && activeAdminTab === 'requests')) && (
                 <section className={`order-20 grid w-full gap-6 ${isAdmin && showAdminAttendanceRequestForm ? 'xl:grid-cols-[420px_1fr]' : ''}`}>
                     {(!isAdmin || showAdminAttendanceRequestForm) && (
-                    <form className={`border border-slate-200 bg-white p-5 shadow-sm ${isAdmin ? 'w-full rounded-lg' : 'relative left-1/2 w-screen -translate-x-1/2 rounded-none border-x-0 sm:left-auto sm:w-full sm:translate-x-0 sm:rounded-lg sm:border-x'}`} onSubmit={submitAttendanceRequest}>
+                    <form className={`border border-slate-200 bg-white p-5 shadow-sm ${isAdmin ? 'w-full rounded-lg' : 'relative -ml-4 w-screen rounded-none border-x-0 sm:ml-0 sm:w-full sm:rounded-lg sm:border-x'}`} onSubmit={submitAttendanceRequest}>
                         <div className="mb-5 flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2">
                                 <FileText className="text-sky-700" size={20} />
