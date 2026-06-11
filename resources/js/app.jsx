@@ -3754,7 +3754,7 @@ function AttendanceApp() {
                                     </a>
                                 )}
                                 {!isAdmin && (
-                                    <div className="flex flex-wrap justify-end gap-2">
+                                    <div className="flex flex-wrap justify-start gap-2">
                                         {clockStatus.can_cancel_clock_in ? (
                                             <button className="secondary-button" type="button" onClick={() => cancelClock('in')}>
                                                 <Clock size={17} />
