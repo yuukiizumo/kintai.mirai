@@ -3200,7 +3200,7 @@ function AttendanceApp() {
                 )}
 
                 {(!isAdmin || (!isStandaloneAdminPage && activeAdminTab === 'requests')) && (
-                <section className={`order-20 grid gap-6 ${!isAdmin || showAdminAttendanceRequestForm ? 'xl:grid-cols-[420px_1fr]' : ''}`}>
+                <section className={`order-20 grid gap-6 ${isAdmin && showAdminAttendanceRequestForm ? 'xl:grid-cols-[420px_1fr]' : ''}`}>
                     {(!isAdmin || showAdminAttendanceRequestForm) && (
                     <form className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm" onSubmit={submitAttendanceRequest}>
                         <div className="mb-5 flex items-center justify-between gap-3">
