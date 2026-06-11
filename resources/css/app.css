@@ -81,10 +81,3 @@
         animation: none;
     }
 }
-
-@media (max-width: 639px) {
-    html,
-    body {
-        overflow-x: hidden;
-    }
-}
