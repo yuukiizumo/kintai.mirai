@@ -3,6 +3,7 @@ import '../css/app.css';
 
 import { createRoot } from 'react-dom/client';
 import {
+    BarChart3,
     CalendarDays,
     ChevronLeft,
     ChevronRight,
@@ -164,6 +165,8 @@ const adminTabs = [
     ['admins', '管理者一覧'],
     ['messages', 'お知らせ'],
     ['retired', '退職者'],
+    ['payroll', '給与計算'],
+    ['dashboard', '集計'],
 ];
 
 const businessCategoriesByDepartment = {
@@ -215,6 +218,12 @@ function userProfileDraft(user = {}) {
             },
         ])),
         hourly_wage: user.hourly_wage ?? '',
+        health_insurance_deduction: user.health_insurance_deduction ?? 0,
+        nursing_care_insurance_deduction: user.nursing_care_insurance_deduction ?? 0,
+        welfare_pension_deduction: user.welfare_pension_deduction ?? 0,
+        employment_insurance_rate: user.employment_insurance_rate ?? 0,
+        income_tax_deduction: user.income_tax_deduction ?? 0,
+        resident_tax_deduction: user.resident_tax_deduction ?? 0,
         department,
         business_category: normalizeBusinessCategory(department, user.business_category ?? ''),
         work_style: user.work_style ?? 'A型',
@@ -318,6 +327,14 @@ function minutesToHours(minutes) {
     return `${hours}:${String(rest).padStart(2, '0')}`;
 }
 
+function formatYen(amount) {
+    return new Intl.NumberFormat('ja-JP', {
+        style: 'currency',
+        currency: 'JPY',
+        maximumFractionDigits: 0,
+    }).format(amount ?? 0);
+}
+
 function shiftMonth(month, amount) {
     const [year, monthNumber] = month.split('-').map(Number);
     const date = new Date(Date.UTC(year, monthNumber - 1 + amount, 1));
@@ -416,6 +433,12 @@ function AttendanceApp() {
     const [retiredRequests, setRetiredRequests] = useState([]);
     const [isRetiredUsersLoading, setIsRetiredUsersLoading] = useState(false);
     const [summary, setSummary] = useState(null);
+    const [attendanceDashboard, setAttendanceDashboard] = useState(null);
+    const [isAttendanceDashboardLoading, setIsAttendanceDashboardLoading] = useState(false);
+    const [payrollData, setPayrollData] = useState(null);
+    const [payrollDrafts, setPayrollDrafts] = useState({});
+    const [savingPayrollUserId, setSavingPayrollUserId] = useState(null);
+    const [isPayrollLoading, setIsPayrollLoading] = useState(false);
     const [calendarHighlights, setCalendarHighlights] = useState({ saturday_work: [], holiday_off: [] });
     const [selectedUser, setSelectedUser] = useState(new URLSearchParams(window.location.search).get('user_id') ?? '');
     const [selectedHistoryDepartment, setSelectedHistoryDepartment] = useState(new URLSearchParams(window.location.search).get('department') ?? '');
@@ -543,6 +566,14 @@ function AttendanceApp() {
 
         if (activeAdminTab === 'requests') {
             loadAttendanceRequests();
+        }
+
+        if (activeAdminTab === 'dashboard') {
+            loadAttendanceDashboard();
+        }
+
+        if (activeAdminTab === 'payroll') {
+            loadPayroll();
         }
 
         if (activeAdminTab === 'messages') {
@@ -761,6 +792,97 @@ function AttendanceApp() {
         setAttendanceRequestsTotal(requestData.pagination?.total ?? requestData.requests.length);
         if ((requestData.requests?.length ?? 0) === 0 && page > 1) {
             setAttendanceRequestsPage(page - 1);
+        }
+    }
+
+    async function loadAttendanceDashboard() {
+        if (!viewer?.is_admin) return;
+
+        setIsAttendanceDashboardLoading(true);
+        try {
+            const params = new URLSearchParams({ month });
+            const data = await request(`/api/attendance-records/dashboard?${params.toString()}`, {
+                headers: { 'Content-Type': 'application/json' },
+            });
+            setAttendanceDashboard(data);
+        } catch (error) {
+            setMessage(error.message);
+            setMessageTone('error');
+        } finally {
+            setIsAttendanceDashboardLoading(false);
+        }
+    }
+
+    async function loadPayroll() {
+        if (!viewer?.is_admin) return;
+
+        setIsPayrollLoading(true);
+        try {
+            const params = new URLSearchParams({ month });
+            const data = await request(`/api/attendance-records/payroll?${params.toString()}`, {
+                headers: { 'Content-Type': 'application/json' },
+            });
+            setPayrollData(data);
+            setPayrollDrafts(Object.fromEntries((data.rows ?? []).map((row) => [
+                row.user_id,
+                {
+                    hourly_wage: row.hourly_wage ?? '',
+                    health_insurance_deduction: row.health_insurance_deduction ?? 0,
+                    nursing_care_insurance_deduction: row.nursing_care_insurance_deduction ?? 0,
+                    welfare_pension_deduction: row.welfare_pension_deduction ?? 0,
+                    employment_insurance_rate: row.employment_insurance_rate ?? 0,
+                    income_tax_deduction: row.income_tax_deduction ?? 0,
+                    resident_tax_deduction: row.resident_tax_deduction ?? 0,
+                },
+            ])));
+        } catch (error) {
+            setMessage(error.message);
+            setMessageTone('error');
+        } finally {
+            setIsPayrollLoading(false);
+        }
+    }
+
+    function updatePayrollDraft(userId, field, value) {
+        setPayrollDrafts((currentDrafts) => ({
+            ...currentDrafts,
+            [userId]: {
+                ...(currentDrafts[userId] ?? {}),
+                [field]: value,
+            },
+        }));
+    }
+
+    async function savePayrollSettings(row) {
+        const draft = payrollDrafts[row.user_id];
+        if (!draft) return;
+
+        setSavingPayrollUserId(row.user_id);
+        setMessage('');
+        setMessageTone('neutral');
+        setErrors({});
+
+        try {
+            await request(`/api/users/${row.user_id}/payroll-settings`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                    hourly_wage: draft.hourly_wage === '' ? null : Number(draft.hourly_wage),
+                    health_insurance_deduction: Number(draft.health_insurance_deduction || 0),
+                    nursing_care_insurance_deduction: Number(draft.nursing_care_insurance_deduction || 0),
+                    welfare_pension_deduction: Number(draft.welfare_pension_deduction || 0),
+                    employment_insurance_rate: Number(draft.employment_insurance_rate || 0),
+                    income_tax_deduction: Number(draft.income_tax_deduction || 0),
+                    resident_tax_deduction: Number(draft.resident_tax_deduction || 0),
+                }),
+            });
+            setMessage(`${row.name} の給与設定を保存しました。`);
+            setMessageTone('success');
+            await loadPayroll();
+        } catch (error) {
+            setMessage(error.message);
+            setMessageTone('error');
+        } finally {
+            setSavingPayrollUserId(null);
         }
     }
 
@@ -1257,6 +1379,12 @@ function AttendanceApp() {
                         },
                     ])),
                     hourly_wage: draft.hourly_wage === '' ? null : Number(draft.hourly_wage),
+                    health_insurance_deduction: Number(draft.health_insurance_deduction || 0),
+                    nursing_care_insurance_deduction: Number(draft.nursing_care_insurance_deduction || 0),
+                    welfare_pension_deduction: Number(draft.welfare_pension_deduction || 0),
+                    employment_insurance_rate: Number(draft.employment_insurance_rate || 0),
+                    income_tax_deduction: Number(draft.income_tax_deduction || 0),
+                    resident_tax_deduction: Number(draft.resident_tax_deduction || 0),
                     commute_limit_days: draft.commute_limit_days,
                     paid_leave_remaining_days: draft.paid_leave_remaining_days === '' ? null : Number(draft.paid_leave_remaining_days),
                     height_cm: draft.height_cm === '' ? null : Number(draft.height_cm),
@@ -1930,6 +2058,18 @@ function AttendanceApp() {
         return 'hover:bg-slate-50';
     }
 
+    function attendanceRequestCardClass(attendanceRequest) {
+        if (attendanceRequest.request_date === today) {
+            return 'bg-sky-50';
+        }
+
+        if (attendanceRequest.request_date < today) {
+            return 'bg-slate-100';
+        }
+
+        return 'bg-white';
+    }
+
     function attendanceRecordRowClass(record) {
         const exceptionalStatuses = [
             'absence',
@@ -2031,6 +2171,91 @@ function AttendanceApp() {
         return clockStatus.can_clock_out || clockStatus.clock_out_disabled_reason === '業務報告を入力してから退勤してください。';
     }
 
+    function renderMobileAttendanceCards() {
+        if (isAdmin) return null;
+
+        return (
+            <div className="grid gap-3 p-4 md:hidden">
+                {isLoading ? (
+                    <p className="rounded-md bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">読み込み中...</p>
+                ) : records.length === 0 ? (
+                    <p className="rounded-md bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">この月の勤怠はまだありません。</p>
+                ) : displayedRecords.map((record) => (
+                    <article key={`attendance-card-${record.id ?? record.user_id}-${record.work_date}`} className={`rounded-lg border border-slate-200 bg-white p-4 shadow-sm ${attendanceRecordRowClass(record)}`}>
+                        <div className="mb-3 flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-semibold text-slate-500">勤務日</p>
+                                <h3 className="mt-1 text-base font-semibold text-slate-950">{record.work_date}</h3>
+                            </div>
+                            <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ${statusClasses[record.display_status_type] ?? statusClasses[record.status]}`}>
+                                {record.display_status ?? statusLabels[record.status]}
+                            </span>
+                        </div>
+                        <dl className="grid grid-cols-2 gap-2 text-sm">
+                            <div className="rounded-md bg-white/70 px-3 py-2 ring-1 ring-slate-200">
+                                <dt className="text-xs font-semibold text-slate-500">出勤</dt>
+                                <dd className="mt-1 font-semibold text-slate-900">{record.clock_in || '-'}</dd>
+                            </div>
+                            <div className="rounded-md bg-white/70 px-3 py-2 ring-1 ring-slate-200">
+                                <dt className="text-xs font-semibold text-slate-500">退勤</dt>
+                                <dd className="mt-1 font-semibold text-slate-900">{record.clock_out || '-'}</dd>
+                            </div>
+                            <div className="rounded-md bg-white/70 px-3 py-2 ring-1 ring-slate-200">
+                                <dt className="text-xs font-semibold text-slate-500">休憩</dt>
+                                <dd className="mt-1 font-semibold text-slate-900">{record.break_minutes}分</dd>
+                            </div>
+                            <div className="rounded-md bg-white/70 px-3 py-2 ring-1 ring-slate-200">
+                                <dt className="text-xs font-semibold text-slate-500">勤務場所</dt>
+                                <dd className="mt-1 font-semibold text-slate-900">{record.work_location_label || '-'}</dd>
+                            </div>
+                        </dl>
+                        <div className="mt-3">
+                            <p className="mb-1 text-xs font-semibold text-slate-500">業務報告</p>
+                            {record.can_report_edit ? (
+                                <textarea
+                                    className="field-control min-h-24 resize-y"
+                                    placeholder="業務報告を入力"
+                                    value={businessReportDrafts[record.id] ?? record.note ?? ''}
+                                    onChange={(event) => scheduleBusinessReportSave(record, event.target.value)}
+                                />
+                            ) : record.note ? (
+                                <p className="whitespace-pre-wrap rounded-md bg-white/70 px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200">{record.note}</p>
+                            ) : (
+                                <p className="rounded-md bg-white/70 px-3 py-2 text-sm text-slate-400 ring-1 ring-slate-200">未入力</p>
+                            )}
+                        </div>
+                        {record.admin_comment && (
+                            <div className="mt-3 rounded-md bg-white/70 px-3 py-2 ring-1 ring-slate-200">
+                                <p className="text-xs font-semibold text-slate-500">管理者コメント</p>
+                                <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{record.admin_comment}</p>
+                            </div>
+                        )}
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button
+                                className="icon-button disabled:cursor-not-allowed disabled:opacity-40"
+                                type="button"
+                                onClick={() => editRecord(record)}
+                                title={record.can_edit ? '修正' : '直近3日以内の勤怠のみ修正できます'}
+                                disabled={!record.can_edit}
+                            >
+                                <Pencil size={16} />
+                            </button>
+                            <button
+                                className="icon-button danger disabled:cursor-not-allowed disabled:opacity-40"
+                                type="button"
+                                onClick={() => deleteRecord(record)}
+                                title={record.can_edit ? '削除' : '直近3日以内の勤怠のみ削除できます'}
+                                disabled={!record.id || !record.can_edit}
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
+                    </article>
+                ))}
+            </div>
+        );
+    }
+
     function selectTargetUser(user) {
         const userId = String(user.id);
         setSelectedUser(userId);
@@ -2091,13 +2316,13 @@ function AttendanceApp() {
                             <p className="text-xs font-semibold text-slate-500">ログイン中</p>
                             <p className="text-sm font-semibold text-slate-950">{isAdmin ? '管理者' : viewer?.name}</p>
                         </div>
-                        <div className="field-label min-w-72">
+                        <div className="field-label min-w-0 sm:min-w-72">
                             対象月
                             <div className="flex items-center gap-2">
                                 <button className="icon-button" type="button" onClick={() => setMonth(shiftMonth(month, -1))} title="前月">
                                     <ChevronLeft size={17} />
                                 </button>
-                                <select className="field-control min-w-36" value={month} onChange={(event) => setMonth(event.target.value)}>
+                                <select className="field-control min-w-0 flex-1 sm:min-w-36" value={month} onChange={(event) => setMonth(event.target.value)}>
                                     {monthOptions.map((monthOption) => (
                                         <option key={monthOption} value={monthOption}>
                                             {formatMonthLabel(monthOption)}
@@ -2195,6 +2420,271 @@ function AttendanceApp() {
                             ))}
                         </div>
                     </nav>
+                )}
+
+                {isAdmin && !isStandaloneAdminPage && activeAdminTab === 'dashboard' && (
+                    <section className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                        <div className="flex flex-col gap-2 border-b border-slate-200 p-5 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 className="flex items-center gap-2 text-lg font-semibold">
+                                    <BarChart3 size={20} className="text-sky-700" />
+                                    勤怠集計ダッシュボード
+                                </h2>
+                                <p className="mt-1 text-sm text-slate-500">
+                                    {formatMonthLabel(attendanceDashboard?.month ?? month)} の全体集計です。
+                                    {attendanceDashboard?.period_end_date && ` 集計対象: ${attendanceDashboard.start_date}〜${attendanceDashboard.period_end_date}`}
+                                </p>
+                            </div>
+                            <button className="secondary-button" type="button" onClick={loadAttendanceDashboard}>
+                                再読み込み
+                            </button>
+                        </div>
+                        {isAttendanceDashboardLoading ? (
+                            <p className="px-5 py-10 text-center text-slate-500">集計中...</p>
+                        ) : !attendanceDashboard ? (
+                            <p className="px-5 py-10 text-center text-slate-500">集計データがありません。</p>
+                        ) : (
+                            <div className="grid min-w-0 gap-5 p-5">
+                                <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                                    <Metric icon={UserRound} label="出勤率" value={`${attendanceDashboard.summary.attendance_rate}%`} />
+                                    <Metric icon={CalendarDays} label="出勤日数" value={`${attendanceDashboard.summary.attendance_days}日`} />
+                                    <Metric icon={Clock} label="総実働時間" value={minutesToHours(attendanceDashboard.summary.worked_minutes)} />
+                                    <Metric icon={Coffee} label="平均実働" value={minutesToHours(attendanceDashboard.summary.average_worked_minutes)} />
+                                </section>
+                                <section className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">未打刻</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{attendanceDashboard.summary.not_clocked_days}日</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">勤務中</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{attendanceDashboard.summary.working_days}日</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">欠勤</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{attendanceDashboard.summary.absence_days}日</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">有給</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{attendanceDashboard.summary.paid_leave_days}日</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">遅刻</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{attendanceDashboard.summary.late_days}日</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">早退</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{attendanceDashboard.summary.early_leave_days}日</p>
+                                    </div>
+                                </section>
+                                <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+                                    <div className="rounded-lg border border-slate-200">
+                                        <div className="border-b border-slate-200 px-4 py-3">
+                                            <h3 className="font-semibold">部署別集計</h3>
+                                        </div>
+                                        <div className="overflow-x-auto">
+                                            <table className="min-w-full text-left text-sm">
+                                                <thead className="bg-slate-50 text-xs font-semibold text-slate-500">
+                                                    <tr>
+                                                        <th className="table-cell">部署</th>
+                                                        <th className="table-cell">出勤率</th>
+                                                        <th className="table-cell">出勤</th>
+                                                        <th className="table-cell">未打刻</th>
+                                                        <th className="table-cell">欠勤</th>
+                                                        <th className="table-cell">有給</th>
+                                                        <th className="table-cell">実働</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100">
+                                                    {attendanceDashboard.departments.length === 0 ? (
+                                                        <tr><td className="px-4 py-8 text-center text-slate-500" colSpan={7}>部署別データがありません。</td></tr>
+                                                    ) : attendanceDashboard.departments.map((department) => (
+                                                        <tr key={department.department} className="hover:bg-slate-50">
+                                                            <td className="table-cell font-semibold">{department.department}</td>
+                                                            <td className="table-cell">{department.attendance_rate}%</td>
+                                                            <td className="table-cell">{department.attendance_days}日</td>
+                                                            <td className="table-cell">{department.not_clocked_days}日</td>
+                                                            <td className="table-cell">{department.absence_days}日</td>
+                                                            <td className="table-cell">{department.paid_leave_days}日</td>
+                                                            <td className="table-cell">{minutesToHours(department.worked_minutes)}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200">
+                                        <div className="border-b border-slate-200 px-4 py-3">
+                                            <h3 className="font-semibold">実働時間 上位10名</h3>
+                                        </div>
+                                        <div className="divide-y divide-slate-100">
+                                            {attendanceDashboard.users.length === 0 ? (
+                                                <p className="px-4 py-8 text-center text-sm text-slate-500">ユーザー別データがありません。</p>
+                                            ) : attendanceDashboard.users.map((userSummary, index) => (
+                                                <div key={userSummary.user_id} className="grid grid-cols-[2rem_1fr_auto] items-center gap-3 px-4 py-3">
+                                                    <span className="text-sm font-semibold text-slate-400">{index + 1}</span>
+                                                    <div className="min-w-0">
+                                                        <p className="truncate font-semibold text-slate-900">{userSummary.name}</p>
+                                                        <p className="truncate text-xs text-slate-500">{userSummary.department}</p>
+                                                    </div>
+                                                    <span className="font-semibold text-slate-900">{minutesToHours(userSummary.worked_minutes)}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </section>
+                            </div>
+                        )}
+                    </section>
+                )}
+
+                {isAdmin && !isStandaloneAdminPage && activeAdminTab === 'payroll' && (
+                    <section className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                        <div className="flex flex-col gap-2 border-b border-slate-200 p-5 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 className="text-lg font-semibold">給与計算</h2>
+                                <p className="mt-1 text-sm text-slate-500">
+                                    {formatMonthLabel(payrollData?.month ?? month)} の概算給与です。
+                                    {payrollData?.period_end_date && ` 計算対象: ${payrollData.start_date}〜${payrollData.period_end_date}`}
+                                </p>
+                            </div>
+                            <button className="secondary-button" type="button" onClick={loadPayroll}>
+                                再読み込み
+                            </button>
+                        </div>
+                        {isPayrollLoading ? (
+                            <p className="px-5 py-10 text-center text-slate-500">計算中...</p>
+                        ) : !payrollData ? (
+                            <p className="px-5 py-10 text-center text-slate-500">給与データがありません。</p>
+                        ) : (
+                            <div className="grid min-w-0 gap-5 p-5">
+                                <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                                    <Metric icon={UserRound} label="対象者" value={`${payrollData.summary.users}名`} />
+                                    <Metric icon={Clock} label="支給対象時間" value={minutesToHours(payrollData.summary.payable_minutes)} />
+                                    <Metric icon={BarChart3} label="概算総支給額" value={formatYen(payrollData.summary.total_pay)} />
+                                    <Metric icon={Coffee} label="差引支給額" value={formatYen(payrollData.summary.net_pay)} />
+                                </section>
+                                <section className="grid gap-3 md:grid-cols-4">
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">控除合計</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatYen(payrollData.summary.total_deductions)}</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">社会保険</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatYen(payrollData.summary.social_insurance_total)}</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">所得税</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatYen(payrollData.summary.income_tax_total)}</p>
+                                    </div>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <p className="text-xs font-semibold text-slate-500">住民税</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatYen(payrollData.summary.resident_tax_total)}</p>
+                                    </div>
+                                </section>
+                                {payrollData.summary.missing_wage_count > 0 && (
+                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
+                                        時給未設定のまま支給対象時間があるユーザーが {payrollData.summary.missing_wage_count} 名います。
+                                    </div>
+                                )}
+                                <section className="min-w-0">
+                                    <div className="min-w-0 overflow-hidden rounded-lg border border-slate-200">
+                                        <div className="border-b border-slate-200 px-4 py-3">
+                                            <h3 className="font-semibold">従業員別給与</h3>
+                                        </div>
+                                        <div className="max-w-full overflow-x-auto">
+                                            <table className="min-w-[1420px] border-separate border-spacing-0 text-left text-sm">
+                                                <thead className="bg-slate-50 text-xs font-semibold text-slate-500">
+                                                    <tr>
+                                                        <th className="sticky left-0 z-20 whitespace-nowrap bg-slate-50 px-3 py-2 shadow-[1px_0_0_#e2e8f0]">従業員</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">部署</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">時給</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">勤務時間</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">有給時間</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">支給対象</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">総支給</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">健康保険</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">介護保険</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">厚生年金</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">雇用料率</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">雇用保険</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">所得税</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">住民税</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">控除合計</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">差引支給額</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">明細PDF</th>
+                                                        <th className="whitespace-nowrap px-3 py-2">保存</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100">
+                                                    {payrollData.rows.length === 0 ? (
+                                                        <tr><td className="px-4 py-8 text-center text-slate-500" colSpan={18}>給与データがありません。</td></tr>
+                                                    ) : payrollData.rows.map((row) => {
+                                                        const draft = payrollDrafts[row.user_id] ?? {};
+
+                                                        return (
+                                                        <tr key={row.user_id} className={row.missing_wage ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-slate-50'}>
+                                                            <td className={`sticky left-0 z-10 whitespace-nowrap px-3 py-2 font-semibold shadow-[1px_0_0_#e2e8f0] ${row.missing_wage ? 'bg-amber-50' : 'bg-white'}`}>
+                                                                <div className="grid gap-1">
+                                                                    <span>{row.name}</span>
+                                                                    {row.management_number && <span className="text-xs font-normal text-slate-400">{row.management_number}</span>}
+                                                                </div>
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">{row.department}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" value={draft.hourly_wage ?? ''} onChange={(event) => updatePayrollDraft(row.user_id, 'hourly_wage', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">{minutesToHours(row.work_minutes)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2">{minutesToHours(row.paid_leave_minutes)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2 font-semibold">{minutesToHours(row.payable_minutes)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2 font-semibold">{formatYen(row.gross_pay)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" value={draft.health_insurance_deduction ?? 0} onChange={(event) => updatePayrollDraft(row.user_id, 'health_insurance_deduction', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" value={draft.nursing_care_insurance_deduction ?? 0} onChange={(event) => updatePayrollDraft(row.user_id, 'nursing_care_insurance_deduction', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" value={draft.welfare_pension_deduction ?? 0} onChange={(event) => updatePayrollDraft(row.user_id, 'welfare_pension_deduction', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" max="100" step="0.001" value={draft.employment_insurance_rate ?? 0} onChange={(event) => updatePayrollDraft(row.user_id, 'employment_insurance_rate', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">{formatYen(row.employment_insurance_deduction)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" value={draft.income_tax_deduction ?? 0} onChange={(event) => updatePayrollDraft(row.user_id, 'income_tax_deduction', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <input className="w-20 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-950 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100" type="number" min="0" value={draft.resident_tax_deduction ?? 0} onChange={(event) => updatePayrollDraft(row.user_id, 'resident_tax_deduction', event.target.value)} />
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">{formatYen(row.total_deductions)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2 font-semibold">{formatYen(row.net_pay)}</td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <a
+                                                                    className="secondary-button px-3 py-2 text-sm"
+                                                                    href={`/api/attendance-records/payroll/slip-pdf?user_id=${encodeURIComponent(row.user_id)}&month=${encodeURIComponent(payrollData.month ?? month)}`}
+                                                                    target="_blank"
+                                                                    rel="noreferrer"
+                                                                >
+                                                                    給与明細PDF
+                                                                </a>
+                                                            </td>
+                                                            <td className="whitespace-nowrap px-3 py-2">
+                                                                <button className="secondary-button px-3 py-2 text-sm" type="button" onClick={() => savePayrollSettings(row)} disabled={savingPayrollUserId === row.user_id}>
+                                                                    {savingPayrollUserId === row.user_id ? '保存中' : '保存'}
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </section>
+                            </div>
+                        )}
+                    </section>
                 )}
 
                 {isAdmin && !isStandaloneAdminPage && activeAdminTab === 'messages' && (
@@ -2655,7 +3145,7 @@ function AttendanceApp() {
                 )}
 
                 {!isAdmin && (
-                    <section className="grid gap-4 md:grid-cols-4">
+                    <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
                         <Metric icon={CalendarDays} label="勤務日数" value={`${summary?.days ?? 0}日`} />
                         <Metric icon={Clock} label="実働時間" value={minutesToHours(summary?.worked_minutes ?? 0)} />
                         <Metric icon={Coffee} label="残業時間" value={minutesToHours(summary?.overtime_minutes ?? 0)} />
@@ -2945,6 +3435,30 @@ function AttendanceApp() {
                                         <input className="field-control" type="number" min="0" value={selectedProfileDraft.hourly_wage} onChange={(event) => updateUserProfileField('hourly_wage', event.target.value)} />
                                     </label>
                                     <label className="field-label">
+                                        健康保険（月額）
+                                        <input className="field-control" type="number" min="0" value={selectedProfileDraft.health_insurance_deduction} onChange={(event) => updateUserProfileField('health_insurance_deduction', event.target.value)} />
+                                    </label>
+                                    <label className="field-label">
+                                        介護保険（月額）
+                                        <input className="field-control" type="number" min="0" value={selectedProfileDraft.nursing_care_insurance_deduction} onChange={(event) => updateUserProfileField('nursing_care_insurance_deduction', event.target.value)} />
+                                    </label>
+                                    <label className="field-label">
+                                        厚生年金（月額）
+                                        <input className="field-control" type="number" min="0" value={selectedProfileDraft.welfare_pension_deduction} onChange={(event) => updateUserProfileField('welfare_pension_deduction', event.target.value)} />
+                                    </label>
+                                    <label className="field-label">
+                                        雇用保険料率（%）
+                                        <input className="field-control" type="number" min="0" max="100" step="0.001" value={selectedProfileDraft.employment_insurance_rate} onChange={(event) => updateUserProfileField('employment_insurance_rate', event.target.value)} />
+                                    </label>
+                                    <label className="field-label">
+                                        所得税（月額）
+                                        <input className="field-control" type="number" min="0" value={selectedProfileDraft.income_tax_deduction} onChange={(event) => updateUserProfileField('income_tax_deduction', event.target.value)} />
+                                    </label>
+                                    <label className="field-label">
+                                        住民税（月額）
+                                        <input className="field-control" type="number" min="0" value={selectedProfileDraft.resident_tax_deduction} onChange={(event) => updateUserProfileField('resident_tax_deduction', event.target.value)} />
+                                    </label>
+                                    <label className="field-label">
                                         部署
                                         <select className="field-control" value={selectedProfileDraft.department} onChange={(event) => updateUserProfileField('department', event.target.value)}>
                                             <option value="新今宮">新今宮</option>
@@ -3200,9 +3714,9 @@ function AttendanceApp() {
                 )}
 
                 {(!isAdmin || (!isStandaloneAdminPage && activeAdminTab === 'requests')) && (
-                <section className={`order-20 grid w-full gap-6 ${isAdmin && showAdminAttendanceRequestForm ? 'xl:grid-cols-[420px_1fr]' : ''}`}>
+                <section className={`order-20 grid min-w-0 w-full gap-6 ${isAdmin && showAdminAttendanceRequestForm ? 'xl:grid-cols-[420px_1fr]' : ''}`}>
                     {(!isAdmin || showAdminAttendanceRequestForm) && (
-                    <form className={`border border-slate-200 bg-white p-5 shadow-sm ${isAdmin ? 'w-full rounded-lg' : 'relative -ml-4 w-screen rounded-none border-x-0 sm:ml-0 sm:w-full sm:rounded-lg sm:border-x'}`} onSubmit={submitAttendanceRequest}>
+                    <form className={`border border-slate-200 bg-white p-5 shadow-sm ${isAdmin ? 'w-full rounded-lg' : 'mx-auto w-full rounded-lg'}`} onSubmit={submitAttendanceRequest}>
                         <div className="mb-5 flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2">
                                 <FileText className="text-sky-700" size={20} />
@@ -3278,9 +3792,9 @@ function AttendanceApp() {
                     </form>
                     )}
 
-                    <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+                    <section className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
                         <div className="flex flex-col gap-3 border-b border-slate-200 p-5 md:flex-row md:items-center md:justify-between">
-                            <h2 className="text-lg font-semibold">{isAdmin ? (showAllAttendanceRequests ? '全員届出一覧' : `${selectedUserName} の届出一覧`) : '自分の届出一覧'}</h2>
+                            <h2 className="min-w-0 text-lg font-semibold">{isAdmin ? (showAllAttendanceRequests ? '全員届出一覧' : `${selectedUserName} の届出一覧`) : '自分の届出一覧'}</h2>
                             {isAdmin && (
                                 <div className="flex flex-wrap gap-2">
                                 {!showAdminAttendanceRequestForm && (
@@ -3302,8 +3816,8 @@ function AttendanceApp() {
                                 </div>
                             )}
                         </div>
-                        <div className="border-b border-slate-200 px-5 py-3">
-                            <div className="flex gap-2 overflow-x-auto pb-1">
+                        <div className="min-w-0 border-b border-slate-200 px-5 py-3">
+                            <div className="flex min-w-0 flex-wrap gap-2 pb-1 md:flex-nowrap md:overflow-x-auto">
                                 {attendanceRequestTypeTabs.map(([typeValue, typeLabel]) => (
                                     <button
                                         key={`request-type-tab-${typeValue}`}
@@ -3316,7 +3830,46 @@ function AttendanceApp() {
                                 ))}
                             </div>
                         </div>
-                        <div className="overflow-x-auto">
+                        {!isAdmin && (
+                            <div className="grid gap-3 p-4 md:hidden">
+                                {attendanceRequests.length === 0 ? (
+                                    <p className="rounded-md bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">この月の届出はまだありません。</p>
+                                ) : sortedAttendanceRequests.map((attendanceRequest) => (
+                                    <article key={`request-card-${attendanceRequest.id}`} className={`min-w-0 rounded-lg border border-slate-200 p-4 shadow-sm ${attendanceRequestCardClass(attendanceRequest)}`}>
+                                        <div className="mb-3 flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <p className="text-xs font-semibold text-slate-500">{attendanceRequest.request_date}</p>
+                                                <h3 className="mt-1 break-words text-base font-semibold text-slate-950">{requestTypes[attendanceRequest.type]}</h3>
+                                            </div>
+                                            <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ${requestStatusClasses[attendanceRequest.status] ?? requestStatusClasses.pending}`}>
+                                                {requestStatusLabels[attendanceRequest.status] ?? requestStatusLabels.pending}
+                                            </span>
+                                        </div>
+                                        <dl className="grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm sm:grid-cols-[7rem_minmax(0,1fr)]">
+                                            <dt className="font-semibold text-slate-500">提出日時</dt>
+                                            <dd className="min-w-0 break-words text-slate-800">{attendanceRequest.submitted_at || attendanceRequest.created_at || '-'}</dd>
+                                            <dt className="font-semibold text-slate-500">時間</dt>
+                                            <dd className="min-w-0 break-words text-slate-800">{attendanceRequest.start_time || attendanceRequest.end_time ? `${attendanceRequest.start_time || '-'}〜${attendanceRequest.end_time || '-'}` : '-'}</dd>
+                                            <dt className="font-semibold text-slate-500">理由</dt>
+                                            <dd className="min-w-0 break-words text-slate-800">{attendanceRequest.reason_category || '-'}</dd>
+                                            <dt className="font-semibold text-slate-500">備考</dt>
+                                            <dd className="min-w-0 whitespace-pre-wrap break-words text-slate-700">{attendanceRequest.reason || '-'}</dd>
+                                        </dl>
+                                        <div className="mt-4 flex justify-end">
+                                            <button
+                                                className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-white px-3 py-2 text-sm font-semibold text-rose-700 shadow-sm hover:bg-rose-50"
+                                                type="button"
+                                                onClick={() => deleteAttendanceRequest(attendanceRequest)}
+                                            >
+                                                <Trash2 size={15} />
+                                                削除
+                                            </button>
+                                        </div>
+                                    </article>
+                                ))}
+                            </div>
+                        )}
+                        <div className={isAdmin ? 'overflow-x-auto' : 'hidden overflow-x-auto md:block'}>
                             <table className="min-w-full text-left text-sm">
                                 <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
                                     <tr>
@@ -3754,7 +4307,7 @@ function AttendanceApp() {
                                     </a>
                                 )}
                                 {!isAdmin && (
-                                    <div className="flex flex-wrap justify-start gap-2">
+                                    <div className="flex w-full flex-wrap justify-end gap-2 md:w-auto">
                                         {clockStatus.can_cancel_clock_in ? (
                                             <button className="secondary-button" type="button" onClick={() => cancelClock('in')}>
                                                 <Clock size={17} />
@@ -3794,7 +4347,8 @@ function AttendanceApp() {
                             </div>
                         </div>
 
-                        <div className="overflow-x-auto">
+                        {renderMobileAttendanceCards()}
+                        <div className={isAdmin ? 'overflow-x-auto' : 'hidden overflow-x-auto md:block'}>
                             <table className="min-w-full text-left text-sm">
                                 <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
                                     <tr>

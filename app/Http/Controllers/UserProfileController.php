@@ -56,6 +56,12 @@ class UserProfileController extends Controller
             'height_cm' => ['nullable', 'numeric', 'min:0', 'max:999.9'],
             'weight_kg' => ['nullable', 'numeric', 'min:0', 'max:999.9'],
             'gender' => ['nullable', Rule::in(['男', '女'])],
+            'health_insurance_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'nursing_care_insurance_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'welfare_pension_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'employment_insurance_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'income_tax_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'resident_tax_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
         ]);
 
         $mondaySettings = $data['workday_settings'][1] ?? $data['workday_settings']['1'];
@@ -68,6 +74,34 @@ class UserProfileController extends Controller
             'default_clock_in' => $mondaySettings['default_clock_in'],
             'default_clock_out' => $mondaySettings['default_clock_out'],
             'default_break_minutes' => $mondaySettings['default_break_minutes'],
+        ]);
+
+        return response()->json($this->serializeUser($user->refresh()));
+    }
+
+    public function updatePayrollSettings(Request $request, User $user)
+    {
+        abort_unless($request->user()->isAdmin(), 403);
+        abort_unless($user->role === 'user', 404);
+
+        $data = $request->validate([
+            'hourly_wage' => ['nullable', 'integer', 'min:0', 'max:999999'],
+            'health_insurance_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'nursing_care_insurance_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'welfare_pension_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'employment_insurance_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'income_tax_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+            'resident_tax_deduction' => ['nullable', 'integer', 'min:0', 'max:9999999'],
+        ]);
+
+        $user->update([
+            'hourly_wage' => $data['hourly_wage'] ?? null,
+            'health_insurance_deduction' => $data['health_insurance_deduction'] ?? 0,
+            'nursing_care_insurance_deduction' => $data['nursing_care_insurance_deduction'] ?? 0,
+            'welfare_pension_deduction' => $data['welfare_pension_deduction'] ?? 0,
+            'employment_insurance_rate' => $data['employment_insurance_rate'] ?? 0,
+            'income_tax_deduction' => $data['income_tax_deduction'] ?? 0,
+            'resident_tax_deduction' => $data['resident_tax_deduction'] ?? 0,
         ]);
 
         return response()->json($this->serializeUser($user->refresh()));
@@ -115,6 +149,12 @@ class UserProfileController extends Controller
             'is_retirement_scheduled' => $user->isRetirementScheduled(),
             'management_number' => $user->management_number ?? '',
             'hourly_wage' => $user->hourly_wage,
+            'health_insurance_deduction' => $user->health_insurance_deduction ?? 0,
+            'nursing_care_insurance_deduction' => $user->nursing_care_insurance_deduction ?? 0,
+            'welfare_pension_deduction' => $user->welfare_pension_deduction ?? 0,
+            'employment_insurance_rate' => $user->employment_insurance_rate ?? 0,
+            'income_tax_deduction' => $user->income_tax_deduction ?? 0,
+            'resident_tax_deduction' => $user->resident_tax_deduction ?? 0,
             'department' => $user->department ?? '',
             'display_order' => $user->display_order ?? 0,
             'department_display_order' => $user->department_display_order ?? 0,

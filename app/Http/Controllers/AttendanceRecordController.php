@@ -20,6 +20,10 @@ use Mpdf\Output\Destination;
 
 class AttendanceRecordController extends Controller
 {
+    private array $calendarEntryDateTypeCache = [];
+
+    private array $publicHolidayCache = [];
+
     private const REQUEST_REASON_CATEGORIES = [
         '私用のため',
         '体調不良のため',
@@ -218,6 +222,628 @@ class AttendanceRecordController extends Controller
                 'total_users' => $department ? $totalUsers : $targetUsers->count(),
             ],
             'records' => $records,
+        ]);
+    }
+
+    public function dashboard(Request $request)
+    {
+        $viewer = $request->user();
+        abort_unless($viewer->isAdmin(), 403);
+
+        $data = $request->validate([
+            'month' => ['nullable', 'date_format:Y-m'],
+        ]);
+        $month = $data['month'] ?? now()->format('Y-m');
+        $start = Carbon::createFromFormat('Y-m-d', "{$month}-01")->startOfMonth();
+        $end = $start->copy()->endOfMonth();
+        $periodEnd = $end->greaterThan(now()->startOfDay()) ? now()->startOfDay() : $end->copy();
+        $users = $this->activeUsersQuery()->get();
+        $this->syncDuePlannedVacationAdjustments($users);
+
+        $userIds = $users->pluck('id');
+        $requestsByKey = AttendanceRequest::query()
+            ->whereIn('user_id', $userIds)
+            ->whereBetween('request_date', [$start->toDateString(), $periodEnd->toDateString()])
+            ->whereIn('type', ['absence', 'late', 'early_leave', 'paid_leave', 'morning_paid_leave', 'afternoon_paid_leave', 'business_support'])
+            ->get()
+            ->groupBy(fn (AttendanceRequest $request) => $request->user_id.'|'.$request->request_date->format('Y-m-d'));
+
+        $recordsByUserAndDate = AttendanceRecord::query()
+            ->with('user:id,name,email,retirement_date,retired_at,commute_limit_days,workday_settings,default_clock_in,default_clock_out,default_break_minutes,department')
+            ->whereIn('user_id', $userIds)
+            ->whereBetween('work_date', [$start->toDateString(), $periodEnd->toDateString()])
+            ->get()
+            ->keyBy(fn (AttendanceRecord $record) => $record->user_id.'|'.$record->work_date->format('Y-m-d'));
+
+        $summary = $this->blankDashboardSummary();
+        $departmentSummaries = [];
+        $userSummaries = [];
+
+        foreach ($users as $user) {
+            $department = $user->department ?: '未設定';
+            $userSummary = $this->blankDashboardSummary();
+            $userSummary['user_id'] = $user->id;
+            $userSummary['name'] = $user->name;
+            $userSummary['department'] = $department;
+
+            if (! isset($departmentSummaries[$department])) {
+                $departmentSummaries[$department] = $this->blankDashboardSummary();
+                $departmentSummaries[$department]['department'] = $department;
+            }
+
+            for ($date = $start->copy(); $date->lessThanOrEqualTo($periodEnd); $date->addDay()) {
+                $dateKey = $date->format('Y-m-d');
+                $requests = $requestsByKey->get($user->id.'|'.$dateKey, collect());
+                $record = $recordsByUserAndDate->get($user->id.'|'.$dateKey);
+                $row = $this->dashboardRow($user, $dateKey, $record, $requests);
+
+                $this->addDashboardRow($summary, $row);
+                $this->addDashboardRow($departmentSummaries[$department], $row);
+                $this->addDashboardRow($userSummary, $row);
+            }
+
+            $this->finalizeDashboardSummary($userSummary);
+            $userSummaries[] = $userSummary;
+        }
+
+        foreach ($departmentSummaries as &$departmentSummary) {
+            $this->finalizeDashboardSummary($departmentSummary);
+        }
+        unset($departmentSummary);
+
+        $this->finalizeDashboardSummary($summary);
+
+        return response()->json([
+            'month' => $month,
+            'start_date' => $start->toDateString(),
+            'end_date' => $end->toDateString(),
+            'period_end_date' => $periodEnd->toDateString(),
+            'summary' => $summary,
+            'departments' => collect($departmentSummaries)
+                ->sortBy('department', SORT_NATURAL)
+                ->values()
+                ->all(),
+            'users' => collect($userSummaries)
+                ->sortByDesc('worked_minutes')
+                ->values()
+                ->take(10)
+                ->all(),
+        ]);
+    }
+
+    public function payroll(Request $request)
+    {
+        $viewer = $request->user();
+        abort_unless($viewer->isAdmin(), 403);
+
+        $data = $request->validate([
+            'month' => ['nullable', 'date_format:Y-m'],
+        ]);
+        $month = $data['month'] ?? now()->format('Y-m');
+        $start = Carbon::createFromFormat('Y-m-d', "{$month}-01")->startOfMonth();
+        $end = $start->copy()->endOfMonth();
+        $periodEnd = $end->greaterThan(now()->startOfDay()) ? now()->startOfDay() : $end->copy();
+        $users = $this->activeUsersQuery()->get();
+        $this->syncDuePlannedVacationAdjustments($users);
+
+        $userIds = $users->pluck('id');
+        $requestsByKey = AttendanceRequest::query()
+            ->whereIn('user_id', $userIds)
+            ->whereBetween('request_date', [$start->toDateString(), $periodEnd->toDateString()])
+            ->whereIn('type', ['absence', 'late', 'early_leave', 'paid_leave', 'morning_paid_leave', 'afternoon_paid_leave', 'business_support'])
+            ->get()
+            ->groupBy(fn (AttendanceRequest $request) => $request->user_id.'|'.$request->request_date->format('Y-m-d'));
+
+        $recordsByUserAndDate = AttendanceRecord::query()
+            ->whereIn('user_id', $userIds)
+            ->whereBetween('work_date', [$start->toDateString(), $periodEnd->toDateString()])
+            ->get()
+            ->keyBy(fn (AttendanceRecord $record) => $record->user_id.'|'.$record->work_date->format('Y-m-d'));
+
+        $summary = [
+            'users' => $users->count(),
+            'total_pay' => 0,
+            'net_pay' => 0,
+            'total_deductions' => 0,
+            'payable_minutes' => 0,
+            'work_minutes' => 0,
+            'paid_leave_minutes' => 0,
+            'paid_leave_minutes' => 0,
+            'social_insurance_total' => 0,
+            'employment_insurance_total' => 0,
+            'income_tax_total' => 0,
+            'resident_tax_total' => 0,
+            'missing_wage_count' => 0,
+        ];
+        $departmentSummaries = [];
+        $rows = [];
+
+        foreach ($users as $user) {
+            $department = $user->department ?: '未設定';
+            $hourlyWage = (int) ($user->hourly_wage ?? 0);
+            $row = [
+                'user_id' => $user->id,
+                'name' => $user->name,
+                'management_number' => $user->management_number ?? '',
+                'department' => $department,
+                'hourly_wage' => $hourlyWage,
+                'work_minutes' => 0,
+                'paid_leave_minutes' => 0,
+                'payable_minutes' => 0,
+                'gross_pay' => 0,
+                'attendance_days' => 0,
+                'paid_leave_days' => 0.0,
+                'absence_days' => 0,
+                'business_support_days' => 0,
+            ];
+
+            if (! isset($departmentSummaries[$department])) {
+                $departmentSummaries[$department] = [
+                    'department' => $department,
+                    'users' => 0,
+                'total_pay' => 0,
+                'net_pay' => 0,
+                'total_deductions' => 0,
+                'payable_minutes' => 0,
+                'work_minutes' => 0,
+                'paid_leave_minutes' => 0,
+                'social_insurance_total' => 0,
+                'employment_insurance_total' => 0,
+                'income_tax_total' => 0,
+                'resident_tax_total' => 0,
+                'missing_wage_count' => 0,
+            ];
+            }
+            $departmentSummaries[$department]['users']++;
+
+            for ($date = $start->copy(); $date->lessThanOrEqualTo($periodEnd); $date->addDay()) {
+                $dateKey = $date->format('Y-m-d');
+                $requests = $requestsByKey->get($user->id.'|'.$dateKey, collect());
+                $record = $recordsByUserAndDate->get($user->id.'|'.$dateKey);
+                $daily = $this->payrollDay($user, $dateKey, $record, $requests);
+
+                $row['work_minutes'] += $daily['work_minutes'];
+                $row['paid_leave_minutes'] += $daily['paid_leave_minutes'];
+                $row['payable_minutes'] += $daily['payable_minutes'];
+                $row['attendance_days'] += $daily['attendance_day'];
+                $row['paid_leave_days'] += $daily['paid_leave_day'];
+                $row['absence_days'] += $daily['absence_day'];
+                $row['business_support_days'] += $daily['business_support_day'];
+            }
+
+            $row['gross_pay'] = $hourlyWage > 0
+                ? (int) round(($row['payable_minutes'] / 60) * $hourlyWage)
+                : 0;
+            $row['health_insurance_deduction'] = (int) ($user->health_insurance_deduction ?? 0);
+            $row['nursing_care_insurance_deduction'] = (int) ($user->nursing_care_insurance_deduction ?? 0);
+            $row['welfare_pension_deduction'] = (int) ($user->welfare_pension_deduction ?? 0);
+            $row['employment_insurance_rate'] = (float) ($user->employment_insurance_rate ?? 0);
+            $row['employment_insurance_deduction'] = (int) round($row['gross_pay'] * ($row['employment_insurance_rate'] / 100));
+            $row['income_tax_deduction'] = (int) ($user->income_tax_deduction ?? 0);
+            $row['resident_tax_deduction'] = (int) ($user->resident_tax_deduction ?? 0);
+            $row['social_insurance_total'] = $row['health_insurance_deduction']
+                + $row['nursing_care_insurance_deduction']
+                + $row['welfare_pension_deduction'];
+            $row['total_deductions'] = $row['social_insurance_total']
+                + $row['employment_insurance_deduction']
+                + $row['income_tax_deduction']
+                + $row['resident_tax_deduction'];
+            $row['net_pay'] = max(0, $row['gross_pay'] - $row['total_deductions']);
+            $row['missing_wage'] = $hourlyWage <= 0 && $row['payable_minutes'] > 0;
+
+            $summary['total_pay'] += $row['gross_pay'];
+            $summary['net_pay'] += $row['net_pay'];
+            $summary['total_deductions'] += $row['total_deductions'];
+            $summary['payable_minutes'] += $row['payable_minutes'];
+            $summary['work_minutes'] += $row['work_minutes'];
+            $summary['paid_leave_minutes'] += $row['paid_leave_minutes'];
+            $summary['social_insurance_total'] += $row['social_insurance_total'];
+            $summary['employment_insurance_total'] += $row['employment_insurance_deduction'];
+            $summary['income_tax_total'] += $row['income_tax_deduction'];
+            $summary['resident_tax_total'] += $row['resident_tax_deduction'];
+            if ($row['missing_wage']) {
+                $summary['missing_wage_count']++;
+                $departmentSummaries[$department]['missing_wage_count']++;
+            }
+
+            $departmentSummaries[$department]['total_pay'] += $row['gross_pay'];
+            $departmentSummaries[$department]['net_pay'] += $row['net_pay'];
+            $departmentSummaries[$department]['total_deductions'] += $row['total_deductions'];
+            $departmentSummaries[$department]['payable_minutes'] += $row['payable_minutes'];
+            $departmentSummaries[$department]['work_minutes'] += $row['work_minutes'];
+            $departmentSummaries[$department]['paid_leave_minutes'] += $row['paid_leave_minutes'];
+            $departmentSummaries[$department]['social_insurance_total'] += $row['social_insurance_total'];
+            $departmentSummaries[$department]['employment_insurance_total'] += $row['employment_insurance_deduction'];
+            $departmentSummaries[$department]['income_tax_total'] += $row['income_tax_deduction'];
+            $departmentSummaries[$department]['resident_tax_total'] += $row['resident_tax_deduction'];
+
+            $rows[] = $row;
+        }
+
+        return response()->json([
+            'month' => $month,
+            'start_date' => $start->toDateString(),
+            'end_date' => $end->toDateString(),
+            'period_end_date' => $periodEnd->toDateString(),
+            'summary' => $summary,
+            'departments' => collect($departmentSummaries)->sortBy('department', SORT_NATURAL)->values()->all(),
+            'rows' => collect($rows)
+                ->sortBy([
+                    ['department', 'asc'],
+                    ['management_number', 'asc'],
+                    ['name', 'asc'],
+                ])
+                ->values()
+                ->all(),
+        ]);
+    }
+
+    public function payrollSlipPdf(Request $request)
+    {
+        $viewer = $request->user();
+        abort_unless($viewer->isAdmin(), 403);
+
+        $data = $request->validate([
+            'user_id' => ['required', 'exists:users,id'],
+            'month' => ['nullable', 'date_format:Y-m'],
+        ]);
+        $month = $data['month'] ?? now()->format('Y-m');
+        $start = Carbon::createFromFormat('Y-m-d', "{$month}-01")->startOfMonth();
+        $end = $start->copy()->endOfMonth();
+        $periodEnd = $end->greaterThan(now()->startOfDay()) ? now()->startOfDay() : $end->copy();
+        $targetUser = User::query()
+            ->where('role', 'user')
+            ->findOrFail($data['user_id']);
+
+        $this->syncDuePlannedVacationAdjustments(collect([$targetUser]));
+
+        $requestsByDate = AttendanceRequest::query()
+            ->where('user_id', $targetUser->id)
+            ->whereBetween('request_date', [$start->toDateString(), $periodEnd->toDateString()])
+            ->whereIn('type', ['absence', 'late', 'early_leave', 'paid_leave', 'morning_paid_leave', 'afternoon_paid_leave', 'business_support'])
+            ->get()
+            ->groupBy(fn (AttendanceRequest $request) => $request->request_date->format('Y-m-d'));
+
+        $recordsByDate = AttendanceRecord::query()
+            ->where('user_id', $targetUser->id)
+            ->whereBetween('work_date', [$start->toDateString(), $periodEnd->toDateString()])
+            ->get()
+            ->keyBy(fn (AttendanceRecord $record) => $record->work_date->format('Y-m-d'));
+
+        $row = [
+            'attendance_days' => 0,
+            'remote_days' => 0,
+            'work_minutes' => 0,
+            'paid_leave_minutes' => 0,
+            'overtime_minutes' => 0,
+            'holiday_overtime_minutes' => 0,
+            'absence_days' => 0,
+            'late_days' => 0,
+            'early_leave_days' => 0,
+            'paid_leave_days' => 0.0,
+            'condolence_leave_days' => 0,
+            'gross_pay' => 0,
+            'basic_pay' => 0,
+            'report_allowance' => 0,
+            'health_insurance_deduction' => (int) ($targetUser->health_insurance_deduction ?? 0),
+            'nursing_care_insurance_deduction' => (int) ($targetUser->nursing_care_insurance_deduction ?? 0),
+            'welfare_pension_deduction' => (int) ($targetUser->welfare_pension_deduction ?? 0),
+            'child_care_contribution_deduction' => 0,
+            'employment_insurance_rate' => (float) ($targetUser->employment_insurance_rate ?? 0),
+            'income_tax_deduction' => (int) ($targetUser->income_tax_deduction ?? 0),
+            'resident_tax_deduction' => (int) ($targetUser->resident_tax_deduction ?? 0),
+            'transportation_expense' => 0,
+            'meal_deduction' => 0,
+            'other_adjustment' => 0,
+        ];
+
+        for ($date = $start->copy(); $date->lessThanOrEqualTo($periodEnd); $date->addDay()) {
+            $dateKey = $date->format('Y-m-d');
+            $requests = $requestsByDate->get($dateKey, collect());
+            $record = $recordsByDate->get($dateKey);
+            $daily = $this->payrollDay($targetUser, $dateKey, $record, $requests);
+            $status = $this->pdfStatusKey($targetUser, $dateKey, $record, $requests, $this->isNonWorkingDate($dateKey, $targetUser));
+
+            $row['work_minutes'] += $daily['work_minutes'];
+            $row['paid_leave_minutes'] += $daily['paid_leave_minutes'];
+            $row['paid_leave_days'] += $daily['paid_leave_day'];
+            $row['absence_days'] += $daily['absence_day'];
+            $row['attendance_days'] += $daily['attendance_day'];
+
+            if ($record?->work_location === 'remote' && $daily['attendance_day'] > 0) {
+                $row['remote_days']++;
+            }
+
+            if (in_array($status, ['late', 'late_and_early'], true)) {
+                $row['late_days']++;
+            }
+
+            if (in_array($status, ['early_leave', 'late_and_early'], true)) {
+                $row['early_leave_days']++;
+            }
+        }
+
+        $hourlyWage = (int) ($targetUser->hourly_wage ?? 0);
+        $payableMinutes = $row['work_minutes'] + $row['paid_leave_minutes'];
+        $row['basic_pay'] = $hourlyWage > 0 ? (int) round(($payableMinutes / 60) * $hourlyWage) : 0;
+        $row['gross_pay'] = $row['basic_pay'] + $row['report_allowance'];
+        $row['employment_insurance_deduction'] = (int) round($row['gross_pay'] * ($row['employment_insurance_rate'] / 100));
+        $row['insurance_total'] = $row['health_insurance_deduction']
+            + $row['nursing_care_insurance_deduction']
+            + $row['welfare_pension_deduction']
+            + $row['child_care_contribution_deduction']
+            + $row['employment_insurance_deduction'];
+        $row['withholding_total'] = $row['income_tax_deduction'] + $row['resident_tax_deduction'];
+        $row['total_deductions'] = $row['insurance_total']
+            + $row['withholding_total']
+            + $row['meal_deduction']
+            + max(0, -1 * $row['other_adjustment']);
+        $row['net_pay'] = $row['gross_pay']
+            + $row['transportation_expense']
+            + max(0, $row['other_adjustment'])
+            - $row['total_deductions'];
+        $row['payable_minutes'] = $payableMinutes;
+
+        $payDate = $start->copy()->addMonthNoOverflow()->day(15);
+        $html = view('payroll-slip-pdf', [
+            'user' => $targetUser,
+            'month' => $start,
+            'periodEnd' => $periodEnd,
+            'payDate' => $payDate,
+            'row' => $row,
+        ])->render();
+
+        $mpdf = $this->makePdf('A4', 4, 6, 19, 6);
+        $mpdf->WriteHTML($html);
+
+        $filename = sprintf('%s_%s_%s.pdf', $targetUser->name, "\u{7D66}\u{4E0E}\u{660E}\u{7D30}", $start->format('Y-m'));
+
+        return response($mpdf->Output('', Destination::STRING_RETURN), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => "attachment; filename=\"payroll-slip.pdf\"; filename*=UTF-8''".rawurlencode($filename),
+        ]);
+
+        $templatePath = resource_path('pdf/payroll-slip-template.pdf');
+
+        if (is_file($templatePath)) {
+            $mpdf = $this->makePdf('A4', 0, 0, 0, 0);
+            $mpdf->AddPage();
+            $mpdf->setSourceFile($templatePath);
+            $template = $mpdf->importPage(1);
+            $mpdf->useTemplate($template, 0, 0, 210, 297);
+            $mpdf->SetFillColor(255, 255, 255);
+
+            $cover = function (float $x, float $y, float $w, float $h) use ($mpdf) {
+                $mpdf->Rect($x, $y, $w, $h, 'F');
+            };
+            $write = function (float $x, float $y, float $w, float $h, string $value, string $align = 'C', float $size = 5.0, bool $bold = false) use ($mpdf) {
+                $mpdf->WriteFixedPosHTML(
+                    '<div style="color:#111;font-family:notosansjp,sans-serif;font-size:'.$size.'pt;font-weight:'.($bold ? '700' : '400').';line-height:1.05;text-align:'.$align.';">'.e($value).'</div>',
+                    $x,
+                    $y,
+                    $w,
+                    $h
+                );
+            };
+            $yen = fn ($value) => '¥'.number_format((int) round($value));
+            $yen = fn ($value) => "\u{00A5}".number_format((int) round($value));
+            $hours = fn ($minutes) => number_format(max(0, (int) $minutes) / 60, 2);
+            $days = fn ($value, $decimals = 0) => number_format((float) $value, $decimals);
+            $paidLeaveDays = floor($row['paid_leave_days']) == $row['paid_leave_days']
+                ? (string) (int) $row['paid_leave_days']
+                : number_format($row['paid_leave_days'], 1);
+            $payEraYear = max(1, (int) $payDate->format('Y') - 2018);
+            $columns = [18.5, 39.5, 60.5, 81.5, 102.5, 123.5, 144.5, 165.5];
+
+            $cover(17, 15.2, 180, 5.8);
+            $write(18, 16.8, 25, 4, $start->format('Y年n月'), 'L');
+            $write(31, 16.8, 55, 4, 'アクティブサポート株式会社', 'L');
+            $write(116, 16.8, 10, 4, '氏名', 'L');
+            $write(128, 16.8, 33, 4, $targetUser->name, 'L', 5.5, true);
+            $write(160, 16.8, 8, 4, '殿', 'L');
+            $write(169, 16.8, 11, 4, '所属', 'L');
+            $write(181, 16.8, 23, 4, $targetUser->department ?: '未設定', 'L');
+
+            $cover(94, 25.1, 28, 4.2);
+            $cover(17, 15.2, 180, 5.8);
+            $write(18, 16.8, 25, 4, $start->year."\u{5E74}".$start->month."\u{6708}", 'L');
+            $write(31, 16.8, 55, 4, "\u{30A2}\u{30AF}\u{30C6}\u{30A3}\u{30D6}\u{30B5}\u{30DD}\u{30FC}\u{30C8}\u{682A}\u{5F0F}\u{4F1A}\u{793E}", 'L');
+            $write(116, 16.8, 10, 4, "\u{6C0F}\u{540D}", 'L');
+            $write(128, 16.8, 33, 4, $targetUser->name, 'L', 5.5, true);
+            $write(160, 16.8, 8, 4, "\u{6BBF}", 'L');
+            $write(169, 16.8, 11, 4, "\u{6240}\u{5C5E}", 'L');
+            $write(181, 16.8, 23, 4, $targetUser->department ?: "\u{672A}\u{8A2D}\u{5B9A}", 'L');
+            $write(94, 25.7, 28, 4, $yen($row['net_pay']), 'C', 5.0, true);
+            $cover(135, 75.7, 45, 4.2);
+            $write(136, 76.2, 43, 4, '令和'.$payEraYear.'年'.$payDate->month.'月'.$payDate->day.'日', 'C');
+            $cover(135, 75.7, 45, 4.2);
+            $write(136, 76.2, 43, 4, "\u{4EE4}\u{548C}".$payEraYear."\u{5E74}".$payDate->month."\u{6708}".$payDate->day."\u{65E5}", 'C');
+
+            foreach ([33.1, 37.8, 45.0, 50.0, 56.8, 61.6] as $y) {
+                foreach ($columns as $x) {
+                    $cover($x + 0.7, $y, 16.6, 3.9);
+                }
+            }
+            foreach ([68.8, 73.0, 77.1] as $y) {
+                foreach ([58, 84, 106] as $x) {
+                    $cover($x + 0.7, $y, 17.2, 3.9);
+                }
+            }
+            $cover($columns[4] + 0.7, 50.0, 34, 3.9);
+            $cover($columns[4] + 0.7, 61.6, 22, 3.9);
+
+            $write($columns[0], 33.7, 18, 4, $days($row['attendance_days'], 2));
+            $write($columns[1], 33.7, 18, 4, $days($row['remote_days']));
+            $write($columns[2], 33.7, 18, 4, $hours($row['work_minutes']));
+            $write($columns[3], 33.7, 18, 4, $hours($row['overtime_minutes']));
+            $write($columns[4], 33.7, 18, 4, $days($row['holiday_overtime_minutes']));
+            $write($columns[5], 33.7, 18, 4, $days($row['absence_days']));
+            $write($columns[6], 33.7, 18, 4, $days($row['late_days']));
+            $write($columns[7], 33.7, 18, 4, $days($row['early_leave_days']));
+
+            $write($columns[0], 38.4, 18, 4, $paidLeaveDays);
+            $write($columns[1], 38.4, 18, 4, $days($row['condolence_leave_days']));
+            $write($columns[2], 38.4, 18, 4, '0');
+
+            $write($columns[0], 45.5, 18, 4, $yen($row['basic_pay']));
+            $write($columns[1], 45.5, 18, 4, $yen(0));
+            $write($columns[2], 45.5, 18, 4, $yen(0));
+            $write($columns[3], 45.5, 18, 4, $yen(0));
+            $write($columns[4], 45.5, 18, 4, $yen(0));
+            $write($columns[5], 45.5, 18, 4, $yen(0));
+            $write($columns[6], 45.5, 18, 4, $yen($row['report_allowance']));
+            $write($columns[7], 45.5, 18, 4, $yen(0));
+
+            $write($columns[0], 50.2, 18, 4, $yen(0));
+            $write($columns[1], 50.2, 18, 4, $yen(0));
+            $write($columns[2], 50.2, 18, 4, $yen(0));
+            $write($columns[3], 50.2, 18, 4, $yen(0));
+            $write($columns[4], 50.2, 30, 4, $yen($row['gross_pay']), 'C', 5.0, true);
+
+            $write($columns[0], 57.0, 18, 4, $yen($row['health_insurance_deduction'] + $row['nursing_care_insurance_deduction']));
+            $write($columns[1], 57.0, 18, 4, $yen($row['welfare_pension_deduction']));
+            $write($columns[2], 57.0, 18, 4, $yen($row['child_care_contribution_deduction']));
+            $write($columns[3], 57.0, 18, 4, $yen($row['employment_insurance_deduction']));
+
+            $write($columns[0], 61.8, 18, 4, $yen($row['income_tax_deduction']));
+            $write($columns[1], 61.8, 18, 4, $yen($row['resident_tax_deduction']));
+            $write($columns[2], 61.8, 20, 4, $yen($row['insurance_total']));
+            $write($columns[3], 61.8, 20, 4, $yen($row['withholding_total']));
+            $write($columns[4], 61.8, 20, 4, $yen($row['total_deductions']), 'C', 5.0, true);
+
+            $write(58, 68.9, 18, 4, $yen($row['transportation_expense']));
+            $write(84, 68.9, 12, 4, '0');
+            $write(106, 68.9, 18, 4, $yen(0));
+            $write(58, 73.0, 18, 4, $yen($row['meal_deduction']));
+            $write(84, 73.0, 12, 4, '0');
+            $write(106, 73.0, 18, 4, $yen(0));
+            $write(58, 77.1, 18, 4, $yen($row['other_adjustment']));
+            $write(84, 77.1, 12, 4, '0');
+            $write(106, 77.1, 18, 4, $yen(0));
+
+            $filename = sprintf('%s_給与明細_%s.pdf', $targetUser->name, $start->format('Y-m'));
+
+            return response($mpdf->Output('', Destination::STRING_RETURN), 200, [
+                'Content-Type' => 'application/pdf',
+                'Content-Disposition' => "attachment; filename=\"payroll-slip.pdf\"; filename*=UTF-8''".rawurlencode($filename),
+            ]);
+        }
+
+        $html = view('payroll-slip-pdf', [
+            'user' => $targetUser,
+            'month' => $start,
+            'periodEnd' => $periodEnd,
+            'payDate' => $payDate,
+            'row' => $row,
+        ])->render();
+
+        $mpdf = $this->makePdf('A4', 6, 6, 10, 6);
+        $mpdf->WriteHTML($html);
+
+        $filename = sprintf('%s_給与明細_%s.pdf', $targetUser->name, $start->format('Y-m'));
+
+        return response($mpdf->Output('', Destination::STRING_RETURN), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => "attachment; filename=\"payroll-slip.pdf\"; filename*=UTF-8''".rawurlencode($filename),
+        ]);
+
+        $payEraYear = max(1, (int) $payDate->format('Y') - 2018);
+        $templatePath = resource_path('pdf/payroll-slip-template.pdf');
+
+        $mpdf = $this->makePdf('A4', 0, 0, 0, 0);
+        if (is_file($templatePath)) {
+            $mpdf->AddPage();
+            $mpdf->setSourceFile($templatePath);
+            $template = $mpdf->importPage(1);
+            $mpdf->useTemplate($template, 0, 0, 210, 297);
+
+            $write = function (float $x, float $y, float $w, float $h, string $value, string $align = 'C', float $size = 5.0, bool $bold = false) use ($mpdf) {
+                $mpdf->WriteFixedPosHTML(
+                    '<div style="background:#fff;color:#111;font-family:notosansjp,sans-serif;font-size:'.$size.'pt;font-weight:'.($bold ? '700' : '400').';line-height:1.05;text-align:'.$align.';">'.e($value).'</div>',
+                    $x,
+                    $y,
+                    $w,
+                    $h
+                );
+            };
+            $yen = fn ($value) => '¥'.number_format((int) round($value));
+            $hours = fn ($minutes) => number_format(max(0, (int) $minutes) / 60, 2);
+            $days = fn ($value, $decimals = 0) => number_format((float) $value, $decimals);
+            $paidLeaveDays = floor($row['paid_leave_days']) == $row['paid_leave_days']
+                ? (string) (int) $row['paid_leave_days']
+                : number_format($row['paid_leave_days'], 1);
+
+            $write(17.5, 16.0, 26, 4, $start->format('Y年n月'), 'L');
+            $write(128, 16.0, 30, 4, $targetUser->name, 'L', 5.5, true);
+            $write(172, 16.0, 22, 4, $targetUser->department ?: '未設定', 'L');
+            $write(95, 24.6, 34, 4.5, $yen($row['net_pay']), 'C', 5.0, true);
+            $write(137, 72.4, 40, 4, '令和'.$payEraYear.'年'.$payDate->month.'月'.$payDate->day.'日', 'C');
+
+            $columns = [21.5, 42.5, 63.5, 84.5, 105.5, 126.5, 147.5, 168.5];
+            $write($columns[0], 33.5, 16, 4, $days($row['attendance_days'], 2));
+            $write($columns[1], 33.5, 16, 4, $days($row['remote_days']));
+            $write($columns[2], 33.5, 16, 4, $hours($row['work_minutes']));
+            $write($columns[3], 33.5, 16, 4, $hours($row['overtime_minutes']));
+            $write($columns[4], 33.5, 16, 4, $days($row['holiday_overtime_minutes']));
+            $write($columns[5], 33.5, 16, 4, $days($row['absence_days']));
+            $write($columns[6], 33.5, 16, 4, $days($row['late_days']));
+            $write($columns[7], 33.5, 16, 4, $days($row['early_leave_days']));
+
+            $write($columns[0], 38.2, 16, 4, $paidLeaveDays);
+            $write($columns[1], 38.2, 16, 4, $days($row['condolence_leave_days']));
+            $write($columns[2], 38.2, 16, 4, '0');
+
+            $write($columns[0], 45.2, 16, 4, $yen($row['basic_pay']));
+            $write($columns[1], 45.2, 16, 4, $yen(0));
+            $write($columns[2], 45.2, 16, 4, $yen(0));
+            $write($columns[3], 45.2, 16, 4, $yen(0));
+            $write($columns[4], 45.2, 16, 4, $yen(0));
+            $write($columns[5], 45.2, 16, 4, $yen(0));
+            $write($columns[6], 45.2, 18, 4, $yen($row['report_allowance']));
+            $write($columns[7], 45.2, 16, 4, $yen(0));
+
+            $write($columns[0], 50.4, 16, 4, $yen(0));
+            $write($columns[1], 50.4, 16, 4, $yen(0));
+            $write($columns[2], 50.4, 16, 4, $yen(0));
+            $write($columns[3], 50.4, 16, 4, $yen(0));
+            $write($columns[4], 50.4, 20, 4, $yen($row['gross_pay']), 'C', 5.0, true);
+
+            $write($columns[0], 57.2, 16, 4, $yen($row['health_insurance_deduction'] + $row['nursing_care_insurance_deduction']));
+            $write($columns[1], 57.2, 16, 4, $yen($row['welfare_pension_deduction']));
+            $write($columns[2], 57.2, 16, 4, $yen($row['child_care_contribution_deduction']));
+            $write($columns[3], 57.2, 16, 4, $yen($row['employment_insurance_deduction']));
+
+            $write($columns[0], 62.0, 16, 4, $yen($row['income_tax_deduction']));
+            $write($columns[1], 62.0, 16, 4, $yen($row['resident_tax_deduction']));
+            $write($columns[2], 62.0, 18, 4, $yen($row['insurance_total']));
+            $write($columns[3], 62.0, 18, 4, $yen($row['withholding_total']));
+            $write($columns[4], 62.0, 18, 4, $yen($row['total_deductions']), 'C', 5.0, true);
+
+            $write(58, 69.3, 18, 4, $yen($row['transportation_expense']));
+            $write(84, 69.3, 12, 4, '0');
+            $write(106, 69.3, 18, 4, $yen(0));
+            $write(58, 73.4, 18, 4, $yen($row['meal_deduction']));
+            $write(84, 73.4, 12, 4, '0');
+            $write(106, 73.4, 18, 4, $yen(0));
+            $write(58, 77.5, 18, 4, $yen($row['other_adjustment']));
+            $write(84, 77.5, 12, 4, '0');
+            $write(106, 77.5, 18, 4, $yen(0));
+        } else {
+            $html = view('payroll-slip-pdf', [
+                'user' => $targetUser,
+                'month' => $start,
+                'periodEnd' => $periodEnd,
+                'payDate' => $payDate,
+                'row' => $row,
+            ])->render();
+            $mpdf->WriteHTML($html);
+        }
+
+        $filename = sprintf('%s_給与明細_%s.pdf', $targetUser->name, $start->format('Y-m'));
+
+        return response($mpdf->Output('', Destination::STRING_RETURN), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => "attachment; filename=\"payroll-slip.pdf\"; filename*=UTF-8''".rawurlencode($filename),
         ]);
     }
 
@@ -1254,6 +1880,14 @@ class AttendanceRecordController extends Controller
                     'R' => 'NotoSansJP-VF.ttf',
                     'B' => 'NotoSansJP-VF.ttf',
                 ],
+                'msgothic' => [
+                    'R' => 'msgothic.ttc',
+                    'B' => 'msgothic.ttc',
+                    'TTCfontID' => [
+                        'R' => 1,
+                        'B' => 1,
+                    ],
+                ],
             ]),
             'default_font' => 'notosansjp',
         ]);
@@ -1575,7 +2209,12 @@ class AttendanceRecordController extends Controller
 
     private function hasCalendarEntry(string $date, string $type): bool
     {
-        return CalendarEntry::query()
+        $key = "{$date}|{$type}";
+        if (array_key_exists($key, $this->calendarEntryDateTypeCache)) {
+            return $this->calendarEntryDateTypeCache[$key];
+        }
+
+        return $this->calendarEntryDateTypeCache[$key] = CalendarEntry::query()
             ->whereDate('date', $date)
             ->where('type', $type)
             ->exists();
@@ -1689,6 +2328,10 @@ class AttendanceRecordController extends Controller
 
     private function japanesePublicHolidays(int $year): array
     {
+        if (isset($this->publicHolidayCache[$year])) {
+            return $this->publicHolidayCache[$year];
+        }
+
         $holidays = [
             "{$year}-01-01",
             Carbon::parse("second monday of January {$year}")->toDateString(),
@@ -1735,7 +2378,7 @@ class AttendanceRecordController extends Controller
             }
         }
 
-        return collect(array_keys($holidaySet))->sort()->values()->all();
+        return $this->publicHolidayCache[$year] = collect(array_keys($holidaySet))->sort()->values()->all();
     }
 
     private function vernalEquinoxDay(int $year): int
@@ -1761,6 +2404,12 @@ class AttendanceRecordController extends Controller
             'is_retirement_scheduled' => $user->isRetirementScheduled(),
             'management_number' => $user->management_number ?? '',
             'hourly_wage' => $user->hourly_wage,
+            'health_insurance_deduction' => $user->health_insurance_deduction ?? 0,
+            'nursing_care_insurance_deduction' => $user->nursing_care_insurance_deduction ?? 0,
+            'welfare_pension_deduction' => $user->welfare_pension_deduction ?? 0,
+            'employment_insurance_rate' => $user->employment_insurance_rate ?? 0,
+            'income_tax_deduction' => $user->income_tax_deduction ?? 0,
+            'resident_tax_deduction' => $user->resident_tax_deduction ?? 0,
             'department' => $user->department ?? '',
             'display_order' => $user->display_order ?? 0,
             'department_display_order' => $user->department_display_order ?? 0,
@@ -1790,6 +2439,188 @@ class AttendanceRecordController extends Controller
             'worked_minutes' => $workedMinutes,
             'overtime_minutes' => max(0, $workedMinutes - ($records->where('status', 'completed')->count() * 8 * 60)),
         ];
+    }
+
+    private function blankDashboardSummary(): array
+    {
+        return [
+            'target_days' => 0,
+            'scheduled_days' => 0,
+            'attendance_days' => 0,
+            'completed_days' => 0,
+            'working_days' => 0,
+            'not_clocked_days' => 0,
+            'holiday_days' => 0,
+            'absence_days' => 0,
+            'paid_leave_days' => 0.0,
+            'late_days' => 0,
+            'early_leave_days' => 0,
+            'business_support_days' => 0,
+            'worked_minutes' => 0,
+            'break_minutes' => 0,
+            'attendance_rate' => 0.0,
+            'average_worked_minutes' => 0,
+        ];
+    }
+
+    private function dashboardRow(User $user, string $date, ?AttendanceRecord $record, $requests): array
+    {
+        $requests = $requests ?? collect();
+        $isNonWorkingDay = $this->isNonWorkingDate($date, $user);
+        $status = $record
+            ? $this->normalizedDisplayRecordStatus($record, $isNonWorkingDay)
+            : ($isNonWorkingDay ? 'holiday' : 'not_clocked');
+        $displayStatus = $this->displayStatus($record, $requests, $status);
+        $calendarStatus = $this->calendarDisplayStatus($date, $user, $record);
+        if ($calendarStatus) {
+            $displayStatus = $calendarStatus;
+        }
+
+        $clockIn = $record?->clock_in ? Carbon::parse($record->clock_in) : null;
+        $clockOut = $record?->clock_out ? Carbon::parse($record->clock_out) : null;
+        $breakMinutes = (int) ($record?->break_minutes ?? 0);
+        $workedMinutes = $clockIn && $clockOut
+            ? max(0, $clockIn->diffInMinutes($clockOut) - $breakMinutes)
+            : 0;
+
+        return [
+            'status' => $status,
+            'display_status_type' => $displayStatus['type'] ?? $status,
+            'worked_minutes' => $workedMinutes,
+            'break_minutes' => $breakMinutes,
+            'is_non_working_day' => $isNonWorkingDay,
+        ];
+    }
+
+    private function addDashboardRow(array &$summary, array $row): void
+    {
+        $status = $row['display_status_type'] ?: $row['status'];
+        $isHoliday = in_array($status, ['holiday', 'free_attendance'], true) || (bool) ($row['is_non_working_day'] ?? false);
+        $summary['target_days']++;
+        $summary['worked_minutes'] += (int) ($row['worked_minutes'] ?? 0);
+        $summary['break_minutes'] += (int) ($row['break_minutes'] ?? 0);
+
+        if ($isHoliday) {
+            $summary['holiday_days']++;
+        } else {
+            $summary['scheduled_days']++;
+        }
+
+        if (in_array($row['status'], ['completed', 'working'], true) || (int) ($row['worked_minutes'] ?? 0) > 0) {
+            $summary['attendance_days']++;
+        }
+
+        if ($row['status'] === 'completed') {
+            $summary['completed_days']++;
+        }
+
+        if ($row['status'] === 'working') {
+            $summary['working_days']++;
+        }
+
+        if ($status === 'not_clocked' && ! $isHoliday) {
+            $summary['not_clocked_days']++;
+        }
+
+        if ($status === 'absence') {
+            $summary['absence_days']++;
+        }
+
+        if (in_array($status, ['paid_leave', 'planned_vacation'], true)) {
+            $summary['paid_leave_days'] += 1;
+        }
+
+        if (in_array($status, ['morning_paid_leave', 'afternoon_paid_leave'], true)) {
+            $summary['paid_leave_days'] += 0.5;
+        }
+
+        if (in_array($status, ['late', 'late_and_early_leave'], true)) {
+            $summary['late_days']++;
+        }
+
+        if (in_array($status, ['early_leave', 'early_leave_planned', 'early_leave_done', 'late_and_early_leave'], true)) {
+            $summary['early_leave_days']++;
+        }
+
+        if ($status === 'business_support') {
+            $summary['business_support_days']++;
+        }
+    }
+
+    private function finalizeDashboardSummary(array &$summary): void
+    {
+        $summary['attendance_rate'] = $summary['scheduled_days'] > 0
+            ? round(($summary['attendance_days'] / $summary['scheduled_days']) * 100, 1)
+            : 0.0;
+        $summary['average_worked_minutes'] = $summary['attendance_days'] > 0
+            ? (int) round($summary['worked_minutes'] / $summary['attendance_days'])
+            : 0;
+    }
+
+    private function payrollDay(User $user, string $date, ?AttendanceRecord $record, $requests): array
+    {
+        $requests = $requests ?? collect();
+        $status = $this->pdfStatusKey($user, $date, $record, $requests, $this->isNonWorkingDate($date, $user));
+        $scheduledMinutes = $this->scheduledPayrollMinutes($user, $date);
+        $workMinutes = $this->recordPayrollMinutes($record);
+        $paidLeaveMinutes = 0;
+
+        if (in_array($status, ['paid_leave', 'planned_vacation'], true)) {
+            $paidLeaveMinutes = $scheduledMinutes;
+            $workMinutes = 0;
+        }
+
+        if (in_array($status, ['morning_paid_leave', 'afternoon_paid_leave'], true)) {
+            $paidLeaveMinutes = (int) round($scheduledMinutes / 2);
+        }
+
+        if ($requests->contains('type', 'business_support') && $workMinutes === 0) {
+            $workMinutes = 60;
+        }
+
+        return [
+            'work_minutes' => $workMinutes,
+            'paid_leave_minutes' => $paidLeaveMinutes,
+            'payable_minutes' => $workMinutes + $paidLeaveMinutes,
+            'attendance_day' => $workMinutes > 0 ? 1 : 0,
+            'paid_leave_day' => in_array($status, ['paid_leave', 'planned_vacation'], true) ? 1 : (in_array($status, ['morning_paid_leave', 'afternoon_paid_leave'], true) ? 0.5 : 0),
+            'absence_day' => $status === 'absence' ? 1 : 0,
+            'business_support_day' => $requests->contains('type', 'business_support') || $record?->status === 'business_support' ? 1 : 0,
+        ];
+    }
+
+    private function recordPayrollMinutes(?AttendanceRecord $record): int
+    {
+        if (! $record) {
+            return 0;
+        }
+
+        $clockIn = $record->declared_clock_in ? substr($record->declared_clock_in, 0, 5) : ($record->clock_in ? substr($record->clock_in, 0, 5) : '');
+        $clockOut = $record->declared_clock_out ? substr($record->declared_clock_out, 0, 5) : ($record->clock_out ? substr($record->clock_out, 0, 5) : '');
+        $rangeMinutes = $this->timeRangeMinutes($clockIn, $clockOut);
+
+        if ($rangeMinutes === null) {
+            return 0;
+        }
+
+        $breakMinutes = (int) ($record->declared_break_minutes ?? $record->break_minutes ?? 0);
+
+        return max(0, $rangeMinutes - $breakMinutes);
+    }
+
+    private function scheduledPayrollMinutes(User $user, string $date): int
+    {
+        if (! $this->isScheduledWorkingDate($date, $user)) {
+            return 0;
+        }
+
+        $weekdaySetting = $user->normalizedWorkdaySettings()[(string) Carbon::parse($date)->dayOfWeekIso] ?? null;
+        $clockIn = $weekdaySetting['default_clock_in'] ?? ($user->default_clock_in ? substr($user->default_clock_in, 0, 5) : '09:00');
+        $clockOut = $weekdaySetting['default_clock_out'] ?? ($user->default_clock_out ? substr($user->default_clock_out, 0, 5) : '18:00');
+        $breakMinutes = (int) ($weekdaySetting['default_break_minutes'] ?? $user->default_break_minutes ?? 60);
+        $rangeMinutes = $this->timeRangeMinutes($clockIn, $clockOut);
+
+        return $rangeMinutes === null ? 0 : max(0, $rangeMinutes - $breakMinutes);
     }
 
     private function monthlyCalendarHighlights(Carbon $start, Carbon $end): array

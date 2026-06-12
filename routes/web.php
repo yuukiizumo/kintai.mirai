@@ -47,6 +47,9 @@ Route::get('/business-report-history', function () {
 
 Route::prefix('api')->middleware('auth')->group(function () {
     Route::get('/attendance-records', [AttendanceRecordController::class, 'index']);
+    Route::get('/attendance-records/dashboard', [AttendanceRecordController::class, 'dashboard']);
+    Route::get('/attendance-records/payroll', [AttendanceRecordController::class, 'payroll']);
+    Route::get('/attendance-records/payroll/slip-pdf', [AttendanceRecordController::class, 'payrollSlipPdf']);
     Route::get('/attendance-records/history', [AttendanceRecordController::class, 'history']);
     Route::get('/attendance-records/history/pdf', [AttendanceRecordController::class, 'historyPdf']);
     Route::get('/attendance-records/history/company-pdf', [AttendanceRecordController::class, 'historyCompanyPdf']);
@@ -77,5 +80,6 @@ Route::prefix('api')->middleware('auth')->group(function () {
     Route::delete('/users/{user}/force-delete', [RetiredUserController::class, 'destroy']);
     Route::put('/users/display-order', [UserDisplayOrderController::class, 'update']);
     Route::put('/users/{user}/profile', [UserProfileController::class, 'update']);
+    Route::put('/users/{user}/payroll-settings', [UserProfileController::class, 'updatePayrollSettings']);
     Route::put('/users/{user}/work-settings', [UserWorkSettingController::class, 'update']);
 });
